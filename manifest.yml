@@ -1,0 +1,83 @@
+name: Update wallpapers list
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.jpg'
+      - '**.jpeg'
+      - '**.png'
+      - '**.webp'
+      - '**.JPG'
+      - '**.JPEG'
+      - '**.PNG'
+permissions:
+  contents: write
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Pillow
+        run: pip install pillow
+      - name: Generate thumbnails and wallpapers.json
+        run: |
+          python3 - <<'PY'
+          import os, json, subprocess, urllib.parse
+          from PIL import Image, ImageOps
+          repo = os.environ["GITHUB_REPOSITORY"]
+          base = "https://raw.githubusercontent.com/%s/main/" % repo
+          exts = (".jpg", ".jpeg", ".png", ".webp")
+          items = []
+
+          def q(path):
+              return urllib.parse.quote(path.replace(os.sep, "/"))
+
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_")]
+              for f in files:
+                  if not f.lower().endswith(exts):
+                      continue
+                  path = os.path.relpath(os.path.join(root, f), ".")
+                  parts = path.split(os.sep)
+                  cat = parts[0] if len(parts) > 1 else ""
+                  try:
+                      im = Image.open(path)
+                      im.load()
+                      rgb = ImageOps.exif_transpose(im).convert("RGB")
+                  except Exception as e:
+                      print("skip", path, e)
+                      continue
+                  w, h = rgb.size
+                  tpath = os.path.join("_thumbs", path + ".jpg")
+                  if not os.path.exists(tpath):
+                      os.makedirs(os.path.dirname(tpath), exist_ok=True)
+                      ImageOps.fit(rgb, (360, 640), Image.LANCZOS).save(tpath, "JPEG", quality=72, optimize=True)
+                  small = rgb.resize((64, 64))
+                  pal_img = small.quantize(colors=6)
+                  pal = pal_img.getpalette()
+                  counts = sorted(pal_img.getcolors(), reverse=True)
+                  cols = ["#%02x%02x%02x" % tuple(pal[i * 3:i * 3 + 3]) for _, i in counts]
+                  ts = subprocess.run(["git", "log", "--diff-filter=A", "--format=%ct", "-1", "--", path],
+                                      capture_output=True, text=True).stdout.strip()
+                  items.append({
+                      "url": base + q(path),
+                      "thumb": base + q(tpath),
+                      "cat": cat,
+                      "t": int(ts or 0),
+                      "c": cols[0],
+                      "pal": cols[:5],
+                      "w": w,
+                      "h": h,
+                  })
+          items.sort(key=lambda x: -x["t"])
+          json.dump({"items": items}, open("wallpapers.json", "w"), ensure_ascii=False)
+          print("wrote", len(items), "items")
+          PY
+      - name: Commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add wallpapers.json _thumbs
+          git diff --cached --quiet || (git commit -m "Update wallpapers.json and thumbnails" && git push)
