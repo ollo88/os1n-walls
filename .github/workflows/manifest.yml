@@ -1,1 +1,110 @@
+name: Update wallpapers list
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.jpg'
+      - '**.jpeg'
+      - '**.png'
+      - '**.webp'
+      - '**.JPG'
+      - '**.JPEG'
+      - '**.PNG'
+permissions:
+  contents: write
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Pillow
+        run: pip install pillow
+      - name: Generate thumbnails, wallpapers.json and ayat.json
+        run: |
+          python3 - <<'PY'
+          import os, json, subprocess, urllib.parse
+          from PIL import Image, ImageOps
+          repo = os.environ["GITHUB_REPOSITORY"]
+          base = "https://raw.githubusercontent.com/%s/main/" % repo
+          exts = (".jpg", ".jpeg", ".png", ".webp")
+          os.makedirs("_thumbs", exist_ok=True)
+          os.makedirs("_thumbs_ayat", exist_ok=True)
 
+          def q(path):
+              return urllib.parse.quote(path.replace(os.sep, "/"))
+
+          # ---- wallpapers: every image outside folders that start with "." or "_" ----
+          items = []
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_")]
+              for f in files:
+                  if not f.lower().endswith(exts):
+                      continue
+                  path = os.path.relpath(os.path.join(root, f), ".")
+                  parts = path.split(os.sep)
+                  cat = parts[0] if len(parts) > 1 else ""
+                  try:
+                      im = Image.open(path)
+                      im.load()
+                      rgb = ImageOps.exif_transpose(im).convert("RGB")
+                  except Exception as e:
+                      print("skip", path, e)
+                      continue
+                  tpath = os.path.join("_thumbs", path + ".jpg")
+                  if not os.path.exists(tpath):
+                      os.makedirs(os.path.dirname(tpath), exist_ok=True)
+                      ImageOps.fit(rgb, (360, 640), Image.LANCZOS).save(tpath, "JPEG", quality=72, optimize=True)
+                  ts = subprocess.run(["git", "log", "--diff-filter=A", "--format=%ct", "-1", "--", path],
+                                      capture_output=True, text=True).stdout.strip()
+                  items.append({
+                      "url": base + q(path),
+                      "thumb": base + q(tpath),
+                      "cat": cat,
+                      "t": int(ts or 0),
+                      "w": rgb.size[0],
+                      "h": rgb.size[1],
+                  })
+          items.sort(key=lambda x: -x["t"])
+          json.dump({"items": items}, open("wallpapers.json", "w"), ensure_ascii=False)
+          print("wallpapers:", len(items))
+
+          # ---- verses: transparent PNG images placed in the _ayat folder ----
+          ayat = []
+          if os.path.isdir("_ayat"):
+              for root, dirs, files in os.walk("_ayat"):
+                  for f in sorted(files):
+                      if not f.lower().endswith((".png", ".webp")):
+                          continue
+                      path = os.path.join(root, f)
+                      try:
+                          im = Image.open(path)
+                          im.load()
+                          rgba = im.convert("RGBA")
+                      except Exception as e:
+                          print("skip", path, e)
+                          continue
+                      tpath = os.path.join("_thumbs_ayat", os.path.relpath(path, "_ayat") + ".png")
+                      if not os.path.exists(tpath):
+                          os.makedirs(os.path.dirname(tpath), exist_ok=True)
+                          t = rgba.copy()
+                          t.thumbnail((360, 360), Image.LANCZOS)
+                          t.save(tpath, "PNG", optimize=True)
+                      ayat.append({
+                          "url": base + q(path),
+                          "thumb": base + q(tpath),
+                          "name": os.path.splitext(f)[0],
+                          "w": rgba.size[0],
+                          "h": rgba.size[1],
+                      })
+          ayat.sort(key=lambda x: x["name"])
+          json.dump({"items": ayat}, open("ayat.json", "w"), ensure_ascii=False)
+          print("verses:", len(ayat))
+          PY
+      - name: Commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add wallpapers.json ayat.json _thumbs _thumbs_ayat
+          git diff --cached --quiet || (git commit -m "Update wallpapers, verses and thumbnails" && git push)
